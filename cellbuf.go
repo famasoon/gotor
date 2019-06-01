@@ -9,6 +9,9 @@ const MAX_CELL_SIZE = 514
 // Optimizations to avoid constantly allocating and deallocating...
 var cellBufChan = make(chan []byte, 100000)
 
+// 514バイトごとにメモリ空間をチャンネルに作成
+// 作成されたメモリ空間の単位はCell
+// 最大で100000cell作成
 func SeedCellBuf() {
 	// Doing this at the start makes our memory usage far more predictable
 	for i := 0; i < 1000; i++ {

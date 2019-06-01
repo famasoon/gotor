@@ -8,14 +8,15 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/tvdw/gotor/tordir"
-	"github.com/tvdw/openssl"
-	"golang.org/x/crypto/curve25519"
 	"io/ioutil"
 	"net"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/tvdw/gotor/tordir"
+	"github.com/tvdw/openssl"
+	"golang.org/x/crypto/curve25519"
 )
 
 type Fingerprint [20]byte
@@ -27,6 +28,7 @@ func (fp Fingerprint) String() string {
 type ORCtx struct {
 	// For convenience we use net.Listen instead of delegating to openssl itself.
 	// This allows us to very easily swap certificates as our listening socket doesn't reference a tls context
+	// 証明書の書き換えが簡単
 	listener net.Listener
 	config   *Config
 
@@ -44,6 +46,7 @@ type ORCtx struct {
 }
 
 func NewOR(torConf *Config) (*ORCtx, error) {
+	// torrcで設定したポートを開く
 	connStr := fmt.Sprintf(":%d", torConf.ORPort)
 	listener, err := net.Listen("tcp", connStr)
 	if err != nil {
@@ -53,15 +56,20 @@ func NewOR(torConf *Config) (*ORCtx, error) {
 	ctx := &ORCtx{
 		listener:                 listener,
 		authenticatedConnections: make(map[Fingerprint]*OnionConnection),
-		config: torConf,
+		config:                   torConf,
 	}
 
+	// Torノードで使っている秘密鍵が存在しているか確認し、存在しなかったら鍵を生成
 	if _, err := os.Stat(torConf.DataDirectory + "/keys/secret_id_key"); os.IsNotExist(err) {
 		Log(LOG_INFO, "Generating new keys")
 		os.Mkdir(torConf.DataDirectory, 0755)
 		os.Mkdir(torConf.DataDirectory+"/keys", 0700)
 
 		{
+			// TorではRSAを使用する際1024bit長で鍵を生成する
+			// https://gitweb.torproject.org/torspec.git/tree/tor-spec.txt#n80
+			//TODO: openssl実装の鍵生成をしているがGo実装のRSAではダメか確認
+			// https://golang.org/pkg/crypto/rsa/#GenerateKey
 			newIDKey, err := openssl.GenerateRSAKeyWithExponent(1024, 65537)
 			if err != nil {
 				return nil, err
@@ -159,6 +167,8 @@ func (or *ORCtx) RotateKeys() error {
 }
 
 func (or *ORCtx) UpdateDescriptor() {
+	// ORノードの公開情報を設定
+	// https://torstatus.blutmagie.de/ で確認できる情報
 	d := &or.descriptor
 	d.Nickname = or.config.Nickname
 	d.Contact = or.config.Contact
@@ -179,6 +189,7 @@ func (or *ORCtx) UpdateDescriptor() {
 	}
 	d.ExitPolicy = policy
 
+	// Torで使っている秘密鍵でDescriptor(外部公開されるノード情報)を署名する
 	signed, err := d.SignedDescriptor()
 	if err != nil {
 		Log(LOG_WARN, "%s", err)
@@ -191,6 +202,10 @@ func (or *ORCtx) UpdateDescriptor() {
 func (or *ORCtx) PublishDescriptor() error {
 	if or.config.IsPublicServer {
 		or.UpdateDescriptor()
+		// DescriptorにORノード情報を公開する
+		// https://stem.torproject.org/tutorials/mirror_mirror_on_the_wall.html
+		// authoritiesに入っているサーバはdescriptor
+		// HTTP POSTで情報をアドバタイズしている
 		authorities := []string{"171.25.193.9:443", "86.59.21.38:80", "208.83.223.34:443", "199.254.238.52:80", "194.109.206.212:80", "131.188.40.189:80", "128.31.0.34:9131", "193.23.244.244:80", "154.35.32.5:80"}
 		for _, auth := range authorities {
 			if err := or.descriptor.Publish(auth); err != nil {
@@ -203,6 +218,10 @@ func (or *ORCtx) PublishDescriptor() error {
 
 func (or *ORCtx) Run() {
 	for {
+		// 接続を受け付けてgoroutineで他の処理を済ます
+		// 複数のコネクションを張るためクローズ処理やハンドリングはgoroutine内で行っている。
+		// golang公式ドキュメントを参照
+		// https://golang.org/pkg/net/#example_Listener
 		conn, err := or.listener.Accept()
 		if err != nil {
 			Log(LOG_WARN, "%s", err)
